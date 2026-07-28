@@ -1,0 +1,30 @@
+﻿# Android Studio / IntelliJ
+**/.idea/
+**/*.iml
+
+# Gradle
+**/.gradle/
+**/build/
+
+# Local machine settings
+**/local.properties
+
+# Native / generated
+**/.externalNativeBuild/
+**/.cxx/
+**/captures/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# APK / Bundle çıktıları
+*.apk
+*.aab
+
+# Logs
+*.log
+
+# ChatGPT/IDE artifacts
+**/.artifacts/
+Android-CSI-Labelling-App-master/Android-CSI-Labelling-App-master/

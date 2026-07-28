@@ -1,0 +1,2 @@
+include ':app', ':ESP32CSISerial'
+project(':ESP32CSISerial').projectDir = new File(settingsDir, '../Android-ESP32-CSI-master')
