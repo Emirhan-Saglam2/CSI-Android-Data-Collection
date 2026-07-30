@@ -1,11 +1,8 @@
 package com.stevenmhernandez.csi_labelling_app.Experiments;
 
-import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
-import android.graphics.Color;
 import android.os.Bundle;
-import android.provider.Settings;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
@@ -14,7 +11,6 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.constraintlayout.widget.ConstraintLayout;
 
 import com.stevenmhernandez.csi_labelling_app.Network.UdpCsiReceiver;
 import com.stevenmhernandez.csi_labelling_app.R;
@@ -24,19 +20,8 @@ import com.stevenmhernandez.esp32csiserial.CSIDataInterface;
 import com.stevenmhernandez.esp32csiserial.ESP32CSISerial;
 
 import java.io.IOException;
-import java.util.Timer;
-import java.util.TimerTask;
 
 public class TimerMainActivity extends AppCompatActivity implements CSIDataInterface {
-
-    double timer_pause_seconds = 3.0;
-
-    String[] actions = new String[]{
-            "sit",
-            "*transition*",
-            "stand",
-            "*transition*",
-    };
 
     private ESP32CSISerial csiSerial = new ESP32CSISerial();
 
@@ -45,13 +30,7 @@ public class TimerMainActivity extends AppCompatActivity implements CSIDataInter
     private UdpCsiReceiver udpReceiver;
     private long udpPacketCounter = 0;
 
-    private TextView textView;
-    private ConstraintLayout background;
-    private Timer timer;
-
     private TextView frameRateTextView;
-    private TextView repetitionsTextView;
-
     private Button startStopButton;
     private Button locationButton;
     private Switch objectSwitch;
@@ -63,16 +42,12 @@ public class TimerMainActivity extends AppCompatActivity implements CSIDataInter
     private volatile boolean isRecording = false;
     private volatile String locationName = "";
     private volatile int objectPresent = 0;
-    private volatile String currentAction = "";
 
     /*
      * Uygulama oturumu boyunca aynı CSV dosyası kullanılır.
      */
     private final BaseDataCollectorService dataCollectorService =
             new FileDataCollectorService();
-
-    private int actionIndex = 0;
-    private int actionsRepetitions = 0;
 
     private long csiCounter = 0;
     private long csiPerSecondCounter = 0;
@@ -84,10 +59,7 @@ public class TimerMainActivity extends AppCompatActivity implements CSIDataInter
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_stand_walk_run);
 
-        textView = findViewById(R.id.textView);
-        background = findViewById(R.id.background);
         frameRateTextView = findViewById(R.id.frameRateTextView);
-        repetitionsTextView = findViewById(R.id.repetitionsTextView);
 
         startStopButton = findViewById(R.id.startStopButton);
         locationButton = findViewById(R.id.locationButton);
@@ -111,46 +83,8 @@ public class TimerMainActivity extends AppCompatActivity implements CSIDataInter
          */
         dataCollectorService.handle(
                 "type,esp_device_id,sequence,mac,rssi,channel,esp_timestamp,length,"
-                        + "first_word_invalid,csi_data,current_action,object_present,location\n"
+                        + "first_word_invalid,csi_data,object_present,location\n"
         );
-
-        TimerMainActivity activity = this;
-
-        timer = new Timer();
-        timer.scheduleAtFixedRate(new TimerTask() {
-            @Override
-            public void run() {
-
-                /*
-                 * Hareket etiketi bellekte tutulur.
-                 * Artık ayrıca CURRENT_ACTION satırı CSV'ye yazılmaz.
-                 */
-                currentAction = actions[actionIndex];
-
-                final String actionForUi = currentAction;
-
-                activity.runOnUiThread(() -> {
-                    textView.setText(actionForUi);
-                    textView.setTextColor(Color.BLACK);
-                    background.setBackgroundColor(Color.WHITE);
-
-                    repetitionsTextView.setText(
-                            "Total Reps: "
-                                    + actionsRepetitions
-                                    + " + "
-                                    + actionIndex
-                                    + "/"
-                                    + actions.length
-                    );
-                });
-
-                actionIndex = (actionIndex + 1) % actions.length;
-
-                if (actionIndex == 0) {
-                    actionsRepetitions++;
-                }
-            }
-        }, 0, (long) (timer_pause_seconds * 1000));
 
         udpReceiver = new UdpCsiReceiver(
                 UDP_PORT,
@@ -206,24 +140,6 @@ public class TimerMainActivity extends AppCompatActivity implements CSIDataInter
         super.onPause();
     }
 
-    /*
-     * Eski arayüz/uyumluluk için bırakıldı.
-     * Yeni CSV yapısında ayrı CURRENT_ACTION satırı yazılmıyor.
-     */
-    public String updateCsiString(Activity activity, String action) {
-        String deviceId = Settings.Secure.getString(
-                activity.getContentResolver(),
-                Settings.Secure.ANDROID_ID
-        );
-
-        return String.format(
-                "'CURRENT_ACTION','%s',%d,'%s'\n",
-                deviceId,
-                System.currentTimeMillis(),
-                action
-        );
-    }
-
     public void shareOverBluetooth(View view) {
         Intent intent = new Intent();
         intent.setAction(Intent.ACTION_SEND);
@@ -253,10 +169,7 @@ public class TimerMainActivity extends AppCompatActivity implements CSIDataInter
 
         /*
          * Her CSI satırına o anda geçerli olan:
-         * current_action,
-         * object_present,
-         * location
-         * bilgileri eklenir.
+         * object_present ve location bilgileri eklenir.
          */
         String csvLine = appendMetadata(csiString);
 
@@ -402,7 +315,7 @@ public class TimerMainActivity extends AppCompatActivity implements CSIDataInter
     /*
      * CSI_DATA firmware satırının sonuna sabit sırayla:
      *
-     * current_action, object_present, location
+     * object_present, location
      *
      * eklenir.
      */
@@ -417,11 +330,7 @@ public class TimerMainActivity extends AppCompatActivity implements CSIDataInter
         String safeLocation =
                 locationName.replace("\"", "\"\"");
 
-        String safeAction =
-                currentAction.replace("\"", "\"\"");
-
         return line
-                + ",\"" + safeAction + "\""
                 + "," + objectPresent
                 + ",\"" + safeLocation + "\"\n";
     }
