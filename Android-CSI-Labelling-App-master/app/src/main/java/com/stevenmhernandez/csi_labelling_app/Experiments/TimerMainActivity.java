@@ -9,6 +9,7 @@ import android.widget.EditText;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.os.CountDownTimer;
 
 import androidx.appcompat.app.AppCompatActivity;
 
@@ -26,6 +27,13 @@ public class TimerMainActivity extends AppCompatActivity implements CSIDataInter
     private ESP32CSISerial csiSerial = new ESP32CSISerial();
 
     private static final int UDP_PORT = 5005;
+    private static final long START_COUNTDOWN_MILLIS = 3_000L;
+    private static final long RECORDING_DURATION_MILLIS = 30_000L;
+    private static final long ONE_SECOND_MILLIS = 1_000L;
+
+    private boolean isCountingDown = false;
+    private CountDownTimer startCountdownTimer;
+    private CountDownTimer automaticPauseTimer;
 
     private UdpCsiReceiver udpReceiver;
     private long udpPacketCounter = 0;
@@ -140,6 +148,19 @@ public class TimerMainActivity extends AppCompatActivity implements CSIDataInter
         super.onPause();
     }
 
+    @Override
+    protected void onDestroy() {
+        if (startCountdownTimer != null) {
+            startCountdownTimer.cancel();
+        }
+
+        if (automaticPauseTimer != null) {
+            automaticPauseTimer.cancel();
+        }
+
+        super.onDestroy();
+    }
+
     public void shareOverBluetooth(View view) {
         Intent intent = new Intent();
         intent.setAction(Intent.ACTION_SEND);
@@ -197,60 +218,77 @@ public class TimerMainActivity extends AppCompatActivity implements CSIDataInter
 
     private void toggleRecording() {
 
-        /*
-         * STOP
-         */
-        if (isRecording) {
-            isRecording = false;
-
-            startStopButton.setText("START");
-
-            /*
-             * STOP'tan sonra deney bilgileri tekrar değiştirilebilir.
-             */
-            locationButton.setEnabled(true);
-            objectSwitch.setEnabled(true);
-
-            /*
-             * UDP paketleri gelmeye devam etse bile kullanıcı artık
-             * kayıt sayacının ilerlediğini görmez.
-             */
-            frameRateTextView.setText("KAYIT DURDU");
-
-            Toast.makeText(
-                    this,
-                    "CSI kaydı durduruldu",
-                    Toast.LENGTH_SHORT
-            ).show();
-
+        // Geri sayım devam ederken tekrar START çalıştırılmaz.
+        if (isCountingDown) {
             return;
         }
 
-        /*
-         * Lokasyon girilmeden START yapılmasın.
-         */
+        // Manuel PAUSE
+        if (isRecording) {
+            pauseRecording(false);
+            return;
+        }
+
         if (locationName.trim().isEmpty()) {
             Toast.makeText(
                     this,
                     "Önce lokasyon adını girin",
                     Toast.LENGTH_SHORT
             ).show();
-
             return;
         }
 
-        /*
-         * START
-         */
+        startCountdown();
+    }
+
+    private void startCountdown() {
+        isCountingDown = true;
+
+        locationButton.setEnabled(false);
+        objectSwitch.setEnabled(false);
+        startStopButton.setEnabled(false);
+
+        updateCountdownUi(3);
+
+        startCountdownTimer = new CountDownTimer(
+                START_COUNTDOWN_MILLIS,
+                ONE_SECOND_MILLIS
+        ) {
+            @Override
+            public void onTick(long millisUntilFinished) {
+                long secondsRemaining = Math.max(
+                        1L,
+                        (millisUntilFinished + ONE_SECOND_MILLIS - 1L)
+                                / ONE_SECOND_MILLIS
+                );
+
+                updateCountdownUi(secondsRemaining);
+            }
+
+            @Override
+            public void onFinish() {
+                startCountdownTimer = null;
+                isCountingDown = false;
+                startStopButton.setEnabled(true);
+
+                startRecording();
+            }
+        }.start();
+    }
+
+    private void updateCountdownUi(long secondsRemaining) {
+        String seconds = String.valueOf(secondsRemaining);
+
+        startStopButton.setText(seconds);
+        frameRateTextView.setText(
+                "KAYIT " + seconds + " SANİYE SONRA BAŞLAYACAK"
+        );
+    }
+
+    private void startRecording() {
         isRecording = true;
 
-        startStopButton.setText("STOP");
-
-        /*
-         * Kayıt sırasında metadata değiştirilemez.
-         * Böylece tek kayıt bloğunun ortasında lab1 -> lab2
-         * veya 0 -> 1 değişimi olmaz.
-         */
+        startStopButton.setText("PAUSE");
         locationButton.setEnabled(false);
         objectSwitch.setEnabled(false);
 
@@ -267,6 +305,56 @@ public class TimerMainActivity extends AppCompatActivity implements CSIDataInter
                         + locationName
                         + " | Eşya: "
                         + objectPresent,
+                Toast.LENGTH_SHORT
+        ).show();
+
+        automaticPauseTimer = new CountDownTimer(
+                RECORDING_DURATION_MILLIS,
+                RECORDING_DURATION_MILLIS
+        ) {
+            @Override
+            public void onTick(long millisUntilFinished) {
+                // Her saniye ekranda süre göstermek istemiyorsan boş kalabilir.
+            }
+
+            @Override
+            public void onFinish() {
+                automaticPauseTimer = null;
+
+                if (isRecording) {
+                    pauseRecording(true);
+                }
+            }
+        }.start();
+    }
+
+    private void pauseRecording(boolean automatic) {
+        if (!isRecording) {
+            return;
+        }
+
+        isRecording = false;
+
+        if (automaticPauseTimer != null) {
+            automaticPauseTimer.cancel();
+            automaticPauseTimer = null;
+        }
+
+        startStopButton.setText("START");
+        locationButton.setEnabled(true);
+        objectSwitch.setEnabled(true);
+
+        frameRateTextView.setText(
+                automatic
+                        ? "30 SANİYELİK KAYIT TAMAMLANDI"
+                        : "KAYIT DURDU"
+        );
+
+        Toast.makeText(
+                this,
+                automatic
+                        ? "30 saniyelik CSI kaydı tamamlandı ve duraklatıldı"
+                        : "CSI kaydı duraklatıldı",
                 Toast.LENGTH_SHORT
         ).show();
     }
