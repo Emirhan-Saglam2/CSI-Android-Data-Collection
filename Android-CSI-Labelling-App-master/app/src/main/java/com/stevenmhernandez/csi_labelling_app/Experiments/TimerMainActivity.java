@@ -1,9 +1,12 @@
 package com.stevenmhernandez.csi_labelling_app.Experiments;
 
+import android.Manifest;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.media.AudioManager;
 import android.media.ToneGenerator;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.CountDownTimer;
 import android.os.Handler;
@@ -17,7 +20,13 @@ import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 
 import com.stevenmhernandez.csi_labelling_app.Network.CsiDatagram;
 import com.stevenmhernandez.csi_labelling_app.Network.CsiDeviceTracker;
@@ -34,6 +43,7 @@ public class TimerMainActivity extends AppCompatActivity {
 
     private static final int UDP_PORT = 5005;
     private static final int EXPECTED_DEVICE_COUNT = 4;
+    private static final int ANDROID_16_API_LEVEL = 36;
 
     private static final long START_COUNTDOWN_MILLIS = 3_000L;
     private static final long ONE_SECOND_MILLIS = 1_000L;
@@ -110,6 +120,37 @@ public class TimerMainActivity extends AppCompatActivity {
     private CountDownTimer startCountdownTimer;
     private CountDownTimer automaticPauseTimer;
 
+    private boolean localNetworkPermissionRequestStarted = false;
+
+    private final ActivityResultLauncher<String>
+            localNetworkPermissionLauncher =
+            registerForActivityResult(
+                    new ActivityResultContracts.RequestPermission(),
+                    isGranted -> {
+                        if (isGranted) {
+                            localNetworkPermissionRequestStarted = false;
+                            startUdpReceiver();
+                        } else {
+                            recordingStatusText =
+                                    "YEREL AĞ İZNİ GEREKLİ";
+
+                            if (frameRateTextView != null) {
+                                frameRateTextView.setText(
+                                        recordingStatusText
+                                );
+                            }
+
+                            Toast.makeText(
+                                    this,
+                                    "Android 16'da ESP32 UDP paketlerini "
+                                            + "alabilmek için Yakındaki cihazlar "
+                                            + "izni gereklidir.",
+                                    Toast.LENGTH_LONG
+                            ).show();
+                        }
+                    }
+            );
+
     /*
      * Yalnızca ana arayüz thread'i kullanır.
      */
@@ -132,6 +173,7 @@ public class TimerMainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
 
         setContentView(R.layout.activity_stand_walk_run);
+        applySystemBarInsets();
 
         try {
             toneGenerator = new ToneGenerator(
@@ -167,15 +209,8 @@ public class TimerMainActivity extends AppCompatActivity {
                         objectPresent = isChecked ? 1 : 0
         );
 
-        /*
-         * Uygulama oturumu boyunca tek CSV dosyası kullanılır.
-         */
         dataCollectorService.setup(this);
 
-        /*
-         * İlk 12 kolon eski veri setiyle aynı sırada bırakıldı.
-         * Yeni ağ ve zaman bilgileri sonlarına eklendi.
-         */
         dataCollectorService.handle(
                 "type,esp_device_id,sequence,mac,rssi,channel,"
                         + "esp_timestamp,length,first_word_invalid,csi_data,"
@@ -202,10 +237,7 @@ public class TimerMainActivity extends AppCompatActivity {
                             String message,
                             String sourceIp
                     ) {
-                        handleUdpPacket(
-                                message,
-                                sourceIp
-                        );
+                        handleUdpPacket(message, sourceIp);
                     }
 
                     @Override
@@ -214,7 +246,6 @@ public class TimerMainActivity extends AppCompatActivity {
 
                         if (errorMessage == null
                                 || errorMessage.trim().isEmpty()) {
-
                             errorMessage =
                                     error.getClass().getSimpleName();
                         }
@@ -240,12 +271,80 @@ public class TimerMainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
 
-        if (udpReceiver != null) {
-            udpReceiver.start();
-        }
+        startUdpReceiverWhenPermitted();
 
         uiHandler.removeCallbacks(statisticsUiUpdater);
         uiHandler.post(statisticsUiUpdater);
+    }
+
+    private void startUdpReceiverWhenPermitted() {
+        /*
+         * Android 14 ve daha eski sürümlerde INTERNET izni
+         * yerel UDP alımı için yeterlidir.
+         */
+        if (Build.VERSION.SDK_INT < ANDROID_16_API_LEVEL) {
+            startUdpReceiver();
+            return;
+        }
+
+        boolean permissionGranted =
+                ContextCompat.checkSelfPermission(
+                        this,
+                        Manifest.permission.NEARBY_WIFI_DEVICES
+                ) == PackageManager.PERMISSION_GRANTED;
+
+        if (permissionGranted) {
+            startUdpReceiver();
+            return;
+        }
+
+        if (!localNetworkPermissionRequestStarted) {
+            localNetworkPermissionRequestStarted = true;
+
+            localNetworkPermissionLauncher.launch(
+                    Manifest.permission.NEARBY_WIFI_DEVICES
+            );
+        }
+    }
+
+    private void startUdpReceiver() {
+        if (udpReceiver != null && !udpReceiver.isRunning()) {
+            udpReceiver.start();
+        }
+    }
+
+    private void applySystemBarInsets() {
+        View rootView = findViewById(R.id.background);
+
+        if (rootView == null) {
+            return;
+        }
+
+        final int originalLeft = rootView.getPaddingLeft();
+        final int originalTop = rootView.getPaddingTop();
+        final int originalRight = rootView.getPaddingRight();
+        final int originalBottom = rootView.getPaddingBottom();
+
+        ViewCompat.setOnApplyWindowInsetsListener(
+                rootView,
+                (view, windowInsets) -> {
+                    Insets insets = windowInsets.getInsets(
+                            WindowInsetsCompat.Type.systemBars()
+                                    | WindowInsetsCompat.Type.displayCutout()
+                    );
+
+                    view.setPadding(
+                            originalLeft + insets.left,
+                            originalTop + insets.top,
+                            originalRight + insets.right,
+                            originalBottom + insets.bottom
+                    );
+
+                    return windowInsets;
+                }
+        );
+
+        ViewCompat.requestApplyInsets(rootView);
     }
 
     @Override
@@ -285,9 +384,6 @@ public class TimerMainActivity extends AppCompatActivity {
             udpReceiver.stop();
         }
 
-        /*
-         * Kuyrukta kalan CSV satırları yazılır.
-         */
         dataCollectorService.close();
 
         if (toneGenerator != null) {
@@ -318,9 +414,6 @@ public class TimerMainActivity extends AppCompatActivity {
 
         String trimmedMessage = message.trim();
 
-        /*
-         * CSI dışındaki UDP mesajları CSV'ye yazılmaz.
-         */
         if (!trimmedMessage.startsWith("CSI_DATA")) {
             ignoredDatagramCount.incrementAndGet();
             return;
@@ -345,9 +438,6 @@ public class TimerMainActivity extends AppCompatActivity {
 
         validPacketCount.incrementAndGet();
 
-        /*
-         * Kayıt durmuş olsa bile aktif cihazlar takip edilir.
-         */
         liveDeviceTracker.record(
                 datagram,
                 sourceIp,
@@ -393,9 +483,6 @@ public class TimerMainActivity extends AppCompatActivity {
                 currentSessionId
         );
 
-        /*
-         * Satır arka plan dosya yazma kuyruğuna eklenir.
-         */
         dataCollectorService.handle(csvLine);
         recordingAttemptCount.incrementAndGet();
     }
@@ -420,9 +507,6 @@ public class TimerMainActivity extends AppCompatActivity {
             return;
         }
 
-        /*
-         * Her START işleminde kullanıcı kayıt süresini seçer.
-         */
         showRecordingDurationDialog();
     }
 
@@ -432,11 +516,9 @@ public class TimerMainActivity extends AppCompatActivity {
         input.setHint("Süreyi saniye olarak girin");
         input.setInputType(InputType.TYPE_CLASS_NUMBER);
         input.setSingleLine(true);
-
         input.setText(
                 String.valueOf(recordingDurationSeconds)
         );
-
         input.selectAll();
 
         new AlertDialog.Builder(this)
@@ -518,9 +600,6 @@ public class TimerMainActivity extends AppCompatActivity {
                         ACTIVE_DEVICE_TIMEOUT_NANOS
                 );
 
-        /*
-         * Dörtten az veya fazla cihaz varsa kullanıcı uyarılır.
-         */
         if (activeDeviceCount != EXPECTED_DEVICE_COUNT) {
             showDeviceCountWarning(
                     activeDeviceCount,
@@ -591,9 +670,6 @@ public class TimerMainActivity extends AppCompatActivity {
 
                 startStopButton.setEnabled(true);
 
-                /*
-                 * Geri sayım bitti ve kayıt başlıyor.
-                 */
                 playRecordingStartedSound();
                 startRecording();
             }
@@ -734,10 +810,6 @@ public class TimerMainActivity extends AppCompatActivity {
 
         frameRateTextView.setText(recordingStatusText);
 
-        /*
-         * Yalnızca seçilen süre kendiliğinden tamamlandığında çalar.
-         * Manuel PAUSE işleminde tamamlanma sesi çalmaz.
-         */
         if (automatic) {
             playRecordingFinishedSound();
         }
@@ -982,9 +1054,6 @@ public class TimerMainActivity extends AppCompatActivity {
                 + "...";
     }
 
-    /*
-     * Geri sayım tamamlandığında çalan kısa pozitif onay sesi.
-     */
     private void playRecordingStartedSound() {
         ToneGenerator generator = toneGenerator;
 
@@ -996,9 +1065,6 @@ public class TimerMainActivity extends AppCompatActivity {
         }
     }
 
-    /*
-     * Kayıt süresi tamamlandığında çalan farklı üçlü uyarı sesi.
-     */
     private void playRecordingFinishedSound() {
         ToneGenerator generator = toneGenerator;
 
