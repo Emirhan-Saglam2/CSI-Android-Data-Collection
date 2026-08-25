@@ -1,13 +1,18 @@
 package com.stevenmhernandez.csi_labelling_app.Network;
 
-import android.os.Handler;
-import android.os.Looper;
-
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 
 public class UdpCsiReceiver {
+
+    /*
+     * Tek UDP soketi farklı IP adreslerindeki tüm ESP32 cihazlarından
+     * paket kabul edebilir.
+     */
+    private static final int MAX_UDP_PACKET_BYTES = 65_507;
+    private static final int REQUESTED_RECEIVE_BUFFER_BYTES = 1_048_576;
 
     public interface Listener {
         void onPacket(String message, String sourceIp);
@@ -16,12 +21,11 @@ public class UdpCsiReceiver {
 
     private final int port;
     private final Listener listener;
-    private final Handler mainHandler =
-            new Handler(Looper.getMainLooper());
 
     private volatile boolean running = false;
-    private DatagramSocket socket;
-    private Thread receiverThread;
+    private volatile DatagramSocket socket;
+    private volatile Thread receiverThread;
+    private volatile int actualReceiveBufferBytes = 0;
 
     public UdpCsiReceiver(int port, Listener listener) {
         this.port = port;
@@ -36,15 +40,38 @@ public class UdpCsiReceiver {
         running = true;
 
         receiverThread = new Thread(() -> {
+            DatagramSocket localSocket = null;
+
             try {
-                socket = new DatagramSocket(port);
-                byte[] buffer = new byte[8192];
+                /*
+                 * Soketi önce bağlantısız oluşturuyoruz. Böylece bind işleminden
+                 * önce işletim sisteminin UDP alma tamponunu büyütebiliyoruz.
+                 */
+                localSocket = new DatagramSocket(null);
+                localSocket.setReceiveBufferSize(
+                        REQUESTED_RECEIVE_BUFFER_BYTES
+                );
+                localSocket.bind(new InetSocketAddress(port));
+
+                socket = localSocket;
+                actualReceiveBufferBytes =
+                        localSocket.getReceiveBufferSize();
+
+                /*
+                 * Bir UDP datagramının taşıyabileceği en büyük güvenli veri alanı.
+                 * Böylece uzun CSI satırları sessizce kesilmez.
+                 */
+                byte[] buffer = new byte[MAX_UDP_PACKET_BYTES];
 
                 while (running) {
                     DatagramPacket packet =
                             new DatagramPacket(buffer, buffer.length);
 
-                    socket.receive(packet);
+                    localSocket.receive(packet);
+
+                    if (!running) {
+                        break;
+                    }
 
                     String message = new String(
                             packet.getData(),
@@ -56,23 +83,31 @@ public class UdpCsiReceiver {
                     String sourceIp =
                             packet.getAddress().getHostAddress();
 
-                    mainHandler.post(() ->
-                            listener.onPacket(message, sourceIp)
-                    );
+                    /*
+                     * Paket ana arayüz iş parçacığına gönderilmiyor.
+                     * Doğrulama ve dosya kuyruğuna ekleme daha sonra burada,
+                     * UDP alıcı iş parçacığında yapılacak.
+                     */
+                    try {
+                        listener.onPacket(message, sourceIp);
+                    } catch (Exception callbackError) {
+                        listener.onError(callbackError);
+                    }
                 }
 
             } catch (Exception error) {
                 if (running) {
-                    mainHandler.post(() ->
-                            listener.onError(error)
-                    );
+                    listener.onError(error);
                 }
             } finally {
-                if (socket != null && !socket.isClosed()) {
-                    socket.close();
+                if (localSocket != null && !localSocket.isClosed()) {
+                    localSocket.close();
                 }
 
-                socket = null;
+                if (socket == localSocket) {
+                    socket = null;
+                }
+
                 running = false;
             }
         }, "UdpCsiReceiver");
@@ -83,8 +118,24 @@ public class UdpCsiReceiver {
     public synchronized void stop() {
         running = false;
 
-        if (socket != null && !socket.isClosed()) {
-            socket.close();
+        DatagramSocket currentSocket = socket;
+
+        if (currentSocket != null && !currentSocket.isClosed()) {
+            currentSocket.close();
         }
+
+        Thread currentThread = receiverThread;
+
+        if (currentThread != null) {
+            currentThread.interrupt();
+        }
+    }
+
+    public boolean isRunning() {
+        return running;
+    }
+
+    public int getActualReceiveBufferBytes() {
+        return actualReceiveBufferBytes;
     }
 }
