@@ -29,6 +29,7 @@ public class FileDataCollectorService
     private static final int STREAM_BUFFER_BYTES = 65_536;
     private static final int MAX_BATCH_SIZE = 256;
     private static final long FLUSH_INTERVAL_MILLIS = 500L;
+    private static final long QUEUE_POLL_MILLIS = 250L;
 
     private final BlockingQueue<String> writeQueue =
             new ArrayBlockingQueue<>(WRITE_QUEUE_CAPACITY);
@@ -39,13 +40,23 @@ public class FileDataCollectorService
     private final AtomicLong droppedWriteCount =
             new AtomicLong(0);
 
+    private final AtomicLong recreatedFileCount =
+            new AtomicLong(0);
+
     private final AtomicReference<String> lastErrorMessage =
             new AtomicReference<>(null);
 
+    private final AtomicReference<String> csvHeader =
+            new AtomicReference<>(null);
+
+    private volatile File outputDirectory;
     private volatile File outputFile;
     private volatile BufferedOutputStream outputStream;
     private volatile boolean running = false;
     private volatile Thread writerThread;
+
+    /* Yalnızca CsiFileWriter iş parçacığı tarafından değiştirilir. */
+    private boolean headerWrittenForCurrentFile = false;
 
     @Override
     public synchronized void setup(Context context) {
@@ -53,23 +64,22 @@ public class FileDataCollectorService
             return;
         }
 
-        outputFile = new File(
-                context.getFilesDir(),
-                "backup" + System.currentTimeMillis() + ".csv"
-        );
+        outputDirectory = context.getFilesDir();
+        writeQueue.clear();
+        writtenLineCount.set(0);
+        droppedWriteCount.set(0);
+        recreatedFileCount.set(0);
+        lastErrorMessage.set(null);
+        csvHeader.set(null);
+        headerWrittenForCurrentFile = false;
 
         try {
-            outputStream = new BufferedOutputStream(
-                    new FileOutputStream(outputFile, true),
-                    STREAM_BUFFER_BYTES
-            );
-
+            outputStream = openNewOutputStream();
         } catch (IOException error) {
             setWriteError(error);
             return;
         }
 
-        writeQueue.clear();
         running = true;
 
         writerThread = new Thread(
@@ -81,7 +91,7 @@ public class FileDataCollectorService
     }
 
     /*
-     * Bu metot artık dosyaya doğrudan yazmaz.
+     * Bu metot dosyaya doğrudan yazmaz.
      * Satırı beklemeden yazma kuyruğuna ekler.
      */
     @Override
@@ -90,14 +100,16 @@ public class FileDataCollectorService
             return;
         }
 
+        if (looksLikeCsvHeader(csi)) {
+            csvHeader.compareAndSet(null, csi);
+        }
+
         if (!running) {
             droppedWriteCount.incrementAndGet();
             return;
         }
 
-        boolean accepted = writeQueue.offer(csi);
-
-        if (!accepted) {
+        if (!writeQueue.offer(csi)) {
             droppedWriteCount.incrementAndGet();
         }
     }
@@ -117,7 +129,7 @@ public class FileDataCollectorService
 
                 try {
                     line = writeQueue.poll(
-                            250,
+                            QUEUE_POLL_MILLIS,
                             TimeUnit.MILLISECONDS
                     );
                 } catch (InterruptedException ignored) {
@@ -127,8 +139,10 @@ public class FileDataCollectorService
                      */
                 }
 
+                stream = recreateStreamIfFileWasDeleted(stream);
+
                 if (line != null) {
-                    writeLine(stream, line);
+                    writeQueuedLine(stream, line);
                 }
 
                 int batchCount = 0;
@@ -140,7 +154,7 @@ public class FileDataCollectorService
                         break;
                     }
 
-                    writeLine(stream, queuedLine);
+                    writeQueuedLine(stream, queuedLine);
                     batchCount++;
                 }
 
@@ -164,18 +178,7 @@ public class FileDataCollectorService
             setWriteError(error);
 
         } finally {
-            try {
-                stream.flush();
-            } catch (IOException error) {
-                setWriteError(error);
-            }
-
-            try {
-                stream.close();
-            } catch (IOException error) {
-                setWriteError(error);
-            }
-
+            closeStreamQuietly(stream);
             running = false;
 
             if (outputStream == stream) {
@@ -188,6 +191,112 @@ public class FileDataCollectorService
         }
     }
 
+    /*
+     * Android/Linux'ta açık bir dosya silindiğinde akış eski dosya tanıtıcısına
+     * yazmaya devam edebilir. Bu nedenle dosya yolu düzenli olarak kontrol edilir.
+     * Yol silinmişse eski akış kapatılır ve yeni bir CSV dosyası açılır.
+     */
+    private BufferedOutputStream recreateStreamIfFileWasDeleted(
+            BufferedOutputStream currentStream
+    ) throws IOException {
+
+        File currentFile = outputFile;
+
+        if (currentFile != null && currentFile.isFile()) {
+            return currentStream;
+        }
+
+        closeStreamQuietly(currentStream);
+
+        BufferedOutputStream newStream = openNewOutputStream();
+        headerWrittenForCurrentFile = false;
+
+        String header = csvHeader.get();
+
+        if (header != null && !header.isEmpty()) {
+            writeLine(newStream, header);
+            headerWrittenForCurrentFile = true;
+            newStream.flush();
+        }
+
+        recreatedFileCount.incrementAndGet();
+        lastErrorMessage.set(null);
+
+        Log.i(
+                LOG_TAG,
+                "Silinen CSI dosyasının yerine yeni CSV oluşturuldu: "
+                        + outputFile.getAbsolutePath()
+        );
+
+        return newStream;
+    }
+
+    private BufferedOutputStream openNewOutputStream()
+            throws IOException {
+
+        File directory = outputDirectory;
+
+        if (directory == null) {
+            throw new IOException(
+                    "CSI çıktı klasörü ayarlanmadı"
+            );
+        }
+
+        if (!directory.exists() && !directory.mkdirs()) {
+            throw new IOException(
+                    "CSI çıktı klasörü oluşturulamadı: "
+                            + directory.getAbsolutePath()
+            );
+        }
+
+        long timestamp = System.currentTimeMillis();
+        File candidate = new File(
+                directory,
+                "backup" + timestamp + ".csv"
+        );
+
+        int suffix = 1;
+
+        while (candidate.exists()) {
+            candidate = new File(
+                    directory,
+                    "backup" + timestamp + "_" + suffix + ".csv"
+            );
+            suffix++;
+        }
+
+        BufferedOutputStream newStream =
+                new BufferedOutputStream(
+                        new FileOutputStream(candidate, false),
+                        STREAM_BUFFER_BYTES
+                );
+
+        outputFile = candidate;
+        outputStream = newStream;
+
+        return newStream;
+    }
+
+    private void writeQueuedLine(
+            BufferedOutputStream stream,
+            String line
+    ) throws IOException {
+
+        if (looksLikeCsvHeader(line)) {
+            if (headerWrittenForCurrentFile) {
+                return;
+            }
+
+            headerWrittenForCurrentFile = true;
+        }
+
+        writeLine(stream, line);
+    }
+
+    private boolean looksLikeCsvHeader(String line) {
+        return line.startsWith("type,esp_device_id,");
+    }
+
     private void writeLine(
             BufferedOutputStream stream,
             String line
@@ -198,6 +307,26 @@ public class FileDataCollectorService
         );
 
         writtenLineCount.incrementAndGet();
+    }
+
+    private void closeStreamQuietly(
+            BufferedOutputStream stream
+    ) {
+        if (stream == null) {
+            return;
+        }
+
+        try {
+            stream.flush();
+        } catch (IOException error) {
+            setWriteError(error);
+        }
+
+        try {
+            stream.close();
+        } catch (IOException error) {
+            setWriteError(error);
+        }
     }
 
     private void setWriteError(Exception error) {
@@ -253,9 +382,9 @@ public class FileDataCollectorService
     public Uri getFileUri() throws IOException {
         File file = outputFile;
 
-        if (file == null) {
+        if (file == null || !file.isFile()) {
             throw new IOException(
-                    "CSI çıktı dosyası henüz oluşturulmadı"
+                    "CSI çıktı dosyası bulunamadı; yeniden oluşturulması bekleniyor"
             );
         }
 
@@ -276,6 +405,10 @@ public class FileDataCollectorService
 
     public long getDroppedWriteCount() {
         return droppedWriteCount.get();
+    }
+
+    public long getRecreatedFileCount() {
+        return recreatedFileCount.get();
     }
 
     public String getLastErrorMessage() {
